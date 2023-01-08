@@ -3,7 +3,7 @@ module github.com/spacegrower/tools
 go 1.18
 
 require (
-	github.com/spacegrower/space v0.1.0-alpha.6
+	github.com/golang/protobuf v1.5.2
 	github.com/spacegrower/watermelon v0.1.0-alpha.18
 	go.uber.org/zap v1.24.0
 	google.golang.org/grpc v1.51.0
@@ -13,7 +13,6 @@ require (
 	github.com/coreos/go-semver v0.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.3.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/soheilhy/cmux v0.1.5 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.5 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.5 // indirect
