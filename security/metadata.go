@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	signAppidKey = "wm-appid"
-	signSignKey  = "wm-sign"
-	signTimeKey  = "wm-time"
+	SignAppidKey = "wm-appid"
+	SignSignKey  = "wm-sign"
+	SignTimeKey  = "wm-time"
 )
 
 type SignInfo struct {
@@ -41,20 +41,20 @@ func (s *SignInfo) Time() int64 {
 }
 
 func ParseSignFromIncommingMetadata(incomming metadata.MD) (*SignInfo, error) {
-	if len(incomming.Get(signAppidKey)) == 0 ||
-		len(incomming.Get(signTimeKey)) == 0 ||
-		len(incomming.Get(signSignKey)) == 0 {
+	if len(incomming.Get(SignAppidKey)) == 0 ||
+		len(incomming.Get(SignTimeKey)) == 0 ||
+		len(incomming.Get(SignSignKey)) == 0 {
 		return nil, status.Error(codes.Unauthenticated, "missing auth fileds")
 	}
 
-	signTime, err := strconv.ParseInt(incomming.Get(signTimeKey)[0], 10, 64)
+	signTime, err := strconv.ParseInt(incomming.Get(SignTimeKey)[0], 10, 64)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid sign time")
 	}
 
 	return &SignInfo{
-		appid: incomming.Get(signAppidKey)[0],
-		sign:  incomming.Get(signSignKey)[0],
+		appid: incomming.Get(SignAppidKey)[0],
+		sign:  incomming.Get(SignSignKey)[0],
 		time:  signTime,
 	}, nil
 }

@@ -110,5 +110,5 @@ func (rc *perRPCCredentialOfSign) RequireTransportSecurity() bool { return false
 
 func (rc *perRPCCredentialOfSign) GetRequestMetadata(ctx context.Context, s ...string) (map[string]string, error) {
 	now := time.Now().Unix()
-	return map[string]string{signAppidKey: rc.appid, signSignKey: GenSign(rc.appid, rc.secret, now), signTimeKey: strconv.FormatInt(now, 10)}, nil
+	return map[string]string{SignAppidKey: rc.appid, SignSignKey: GenSign(rc.appid, rc.secret, now), SignTimeKey: strconv.FormatInt(now, 10)}, nil
 }
