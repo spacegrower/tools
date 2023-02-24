@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc/attributes"
 	"google.golang.org/grpc/resolver"
 
-	"github.com/spacegrower/tools/registry/pb/space"
+	"github.com/spacegrower/tools/registry/pb"
 	"github.com/spacegrower/watermelon/infra"
 	"github.com/spacegrower/watermelon/infra/register"
 	wresolver "github.com/spacegrower/watermelon/infra/resolver"
@@ -39,7 +39,7 @@ func NewRemoteResolver(endpoint, region string, opts ...grpc.DialOption) (wresol
 		cancel: cancel,
 		region: region,
 		log:    wlog.With(zap.String("component", "remote-resolver-builder")),
-		client: space.NewRegistryClient(cc),
+		client: pb.NewRegistryClient(cc),
 	}
 
 	resolver.Register(rr)
@@ -50,7 +50,7 @@ func NewRemoteResolver(endpoint, region string, opts ...grpc.DialOption) (wresol
 type remoteRegistry struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
-	client      space.RegistryClient
+	client      pb.RegistryClient
 	grpcOptions []grpc.DialOption
 	namespace   string
 	log         wlog.Logger
@@ -84,7 +84,7 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 		log:     wlog.With(zap.String("component", "remote-resolver")),
 	}
 
-	rr.onResolve = func(resp *space.ResolveInfo) {
+	rr.onResolve = func(resp *pb.ResolveInfo) {
 		var addrs []resolver.Address
 		config, err := parseServiceConfig(resp.Config)
 		if err != nil {
@@ -131,16 +131,16 @@ type remoteResolver struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	client space.RegistryClient
+	client pb.RegistryClient
 
 	service   string
 	region    string
 	target    resolver.Target
 	cc        resolver.ClientConn
 	opts      resolver.BuildOptions
-	run       func() (revc func() (*space.ResolveInfo, error), update func(*space.ResolveInfo))
+	run       func() (revc func() (*pb.ResolveInfo, error), update func(*pb.ResolveInfo))
 	log       wlog.Logger
-	onResolve func(resp *space.ResolveInfo)
+	onResolve func(resp *pb.ResolveInfo)
 
 	locker sync.Mutex
 }
@@ -157,7 +157,7 @@ func (r *remoteResolver) Close() {
 	r.cancel()
 }
 
-func (r *remoteResolver) resolve(resp *space.ResolveInfo) ([]resolver.Address, error) {
+func (r *remoteResolver) resolve(resp *pb.ResolveInfo) ([]resolver.Address, error) {
 	var result []resolver.Address
 	for addr, conf := range resp.Address {
 		addr, err := parseNodeInfo(addr, conf, func(attr register.NodeMeta, addr *resolver.Address) bool {
@@ -233,7 +233,7 @@ func watch(r *remoteResolver) error {
 
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	remoteResolver, err := r.client.Resolver(r.ctx,
-		&space.TargetInfo{
+		&pb.TargetInfo{
 			Service: r.target.URL.Path,
 		})
 	if err != nil {
