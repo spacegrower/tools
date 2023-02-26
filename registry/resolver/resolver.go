@@ -7,15 +7,17 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/attributes"
 	"google.golang.org/grpc/resolver"
 
-	"github.com/spacegrower/tools/registry/pb/space"
+	"github.com/spacegrower/tools/registry/pb"
 	"github.com/spacegrower/watermelon/infra"
 	"github.com/spacegrower/watermelon/infra/register"
+	"github.com/spacegrower/watermelon/infra/register/etcd"
 	wresolver "github.com/spacegrower/watermelon/infra/resolver"
 	"github.com/spacegrower/watermelon/infra/wlog"
 	"github.com/spacegrower/watermelon/pkg/safe"
@@ -39,7 +41,7 @@ func NewRemoteResolver(endpoint, region string, opts ...grpc.DialOption) (wresol
 		cancel: cancel,
 		region: region,
 		log:    wlog.With(zap.String("component", "remote-resolver-builder")),
-		client: space.NewRegistryClient(cc),
+		client: pb.NewRegistryClient(cc),
 	}
 
 	resolver.Register(rr)
@@ -50,7 +52,7 @@ func NewRemoteResolver(endpoint, region string, opts ...grpc.DialOption) (wresol
 type remoteRegistry struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
-	client      space.RegistryClient
+	client      pb.RegistryClient
 	grpcOptions []grpc.DialOption
 	namespace   string
 	log         wlog.Logger
@@ -84,7 +86,7 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 		log:     wlog.With(zap.String("component", "remote-resolver")),
 	}
 
-	rr.onResolve = func(resp *space.ResolveInfo) {
+	rr.onResolve = func(resp *pb.ResolveInfo) {
 		var addrs []resolver.Address
 		config, err := parseServiceConfig(resp.Config)
 		if err != nil {
@@ -112,6 +114,35 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 			}
 		}
 
+		if len(addrs) == 1 && addrs[0] == wresolver.NilAddress && (rr.delayer == nil || rr.delayer.ctx.Err() != nil) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute*3)
+			rr.delayer = &delayer{
+				ctx:    ctx,
+				cancel: cancel,
+			}
+			go func() {
+				ticker := time.NewTimer(time.Minute * 5)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						cc.UpdateState(resolver.State{
+							Addresses: []resolver.Address{wresolver.NilAddress},
+						})
+
+					case <-rr.delayer.ctx.Done():
+					}
+					return
+				}
+			}()
+			return
+		}
+
+		if rr.delayer.ctx != nil {
+			rr.delayer.cancel()
+			rr.delayer = nil
+		}
+
 		if err := cc.UpdateState(resolver.State{
 			Addresses:     addrs,
 			ServiceConfig: cc.ParseServiceConfig(wresolver.ParseCustomizeToGrpcServiceConfig(config)),
@@ -131,18 +162,25 @@ type remoteResolver struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	client space.RegistryClient
+	client pb.RegistryClient
 
 	service   string
 	region    string
 	target    resolver.Target
 	cc        resolver.ClientConn
 	opts      resolver.BuildOptions
-	run       func() (revc func() (*space.ResolveInfo, error), update func(*space.ResolveInfo))
+	run       func() (revc func() (*pb.ResolveInfo, error), update func(*pb.ResolveInfo))
 	log       wlog.Logger
-	onResolve func(resp *space.ResolveInfo)
+	onResolve func(resp *pb.ResolveInfo)
 
 	locker sync.Mutex
+
+	delayer *delayer
+}
+
+type delayer struct {
+	ctx    context.Context
+	cancel func()
 }
 
 func (r *remoteResolver) ResolveNow(_ resolver.ResolveNowOptions) {
@@ -157,10 +195,10 @@ func (r *remoteResolver) Close() {
 	r.cancel()
 }
 
-func (r *remoteResolver) resolve(resp *space.ResolveInfo) ([]resolver.Address, error) {
+func (r *remoteResolver) resolve(resp *pb.ResolveInfo) ([]resolver.Address, error) {
 	var result []resolver.Address
 	for addr, conf := range resp.Address {
-		addr, err := parseNodeInfo(addr, conf, func(attr register.NodeMeta, addr *resolver.Address) bool {
+		addr, err := parseNodeInfo(addr, conf, func(attr etcd.NodeMeta, addr *resolver.Address) bool {
 			if r.region == "" {
 				return true
 			}
@@ -207,9 +245,9 @@ func parseServiceConfig(val []byte) (*wresolver.CustomizeServiceConfig, error) {
 
 var filterError = errors.New("filter")
 
-func parseNodeInfo(key string, val []byte, allowFunc func(attr register.NodeMeta, addr *resolver.Address) bool) (resolver.Address, error) {
+func parseNodeInfo(key string, val []byte, allowFunc func(attr etcd.NodeMeta, addr *resolver.Address) bool) (resolver.Address, error) {
 	addr := resolver.Address{Addr: filepath.ToSlash(filepath.Base(string(key)))}
-	var attr register.NodeMeta
+	var attr etcd.NodeMeta
 	if err := json.Unmarshal(val, &attr); err != nil {
 		return addr, err
 	}
@@ -233,7 +271,7 @@ func watch(r *remoteResolver) error {
 
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	remoteResolver, err := r.client.Resolver(r.ctx,
-		&space.TargetInfo{
+		&pb.TargetInfo{
 			Service: r.target.URL.Path,
 		})
 	if err != nil {

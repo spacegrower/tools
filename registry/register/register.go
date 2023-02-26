@@ -9,13 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/spacegrower/tools/registry/pb/space"
+	"github.com/spacegrower/tools/registry/pb"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 
 	"github.com/spacegrower/watermelon/infra/definition"
 	"github.com/spacegrower/watermelon/infra/graceful"
 	"github.com/spacegrower/watermelon/infra/register"
+	"github.com/spacegrower/watermelon/infra/register/etcd"
 	"github.com/spacegrower/watermelon/infra/utils"
 	"github.com/spacegrower/watermelon/infra/wlog"
 	"github.com/spacegrower/watermelon/pkg/safe"
@@ -25,13 +26,13 @@ type remoteRegistry struct {
 	once       sync.Once
 	ctx        context.Context
 	cancelFunc context.CancelFunc
-	client     space.Registry_RegisterClient
-	meta       register.NodeMeta
+	client     pb.RegistryClient
+	metas      []etcd.NodeMeta
 	log        wlog.Logger
 	reConnect  func() error
 }
 
-func NewRemoteRegister(endpoint string, opts ...grpc.DialOption) (register.ServiceRegister, error) {
+func NewRemoteRegister(endpoint string, opts ...grpc.DialOption) (register.ServiceRegister[etcd.NodeMeta], error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	rr := &remoteRegistry{
@@ -45,11 +46,7 @@ func NewRemoteRegister(endpoint string, opts ...grpc.DialOption) (register.Servi
 		if err != nil {
 			return err
 		}
-		client, err := space.NewRegistryClient(cc).Register(ctx)
-		if err != nil {
-			return err
-		}
-		rr.client = client
+		rr.client = pb.NewRegistryClient(cc)
 		return nil
 	}
 
@@ -58,38 +55,10 @@ func NewRemoteRegister(endpoint string, opts ...grpc.DialOption) (register.Servi
 		return nil, err
 	}
 
-	go safe.Run(func() {
-		for {
-			select {
-			case <-rr.ctx.Done():
-				if rr.client != nil {
-					rr.client.CloseSend()
-				}
-				return
-			default:
-				resp, err := rr.client.Recv()
-				if err != nil {
-					rr.log.Warn("recv with error", zap.Error(err))
-					if err == io.EOF {
-						time.Sleep(time.Second)
-						if err = rr.reConnect(); err != nil {
-							rr.log.Error("failed to reconnect registry", zap.Error(err))
-							continue
-						}
-					}
-
-					rr.reRegister()
-				} else {
-					rr.log.Debug("TODO", zap.String("command", resp.Command), zap.Any("args", resp.Args))
-				}
-			}
-		}
-	})
-
 	return rr, nil
 }
 
-func (s *remoteRegistry) Init(meta register.NodeMeta) error {
+func (s *remoteRegistry) Append(meta etcd.NodeMeta) error {
 	// customize your register logic
 	meta.Weight = utils.GetEnvWithDefault(definition.NodeWeightENVKey, 100, func(val string) (int32, error) {
 		res, err := strconv.Atoi(val)
@@ -99,16 +68,20 @@ func (s *remoteRegistry) Init(meta register.NodeMeta) error {
 		return int32(res), nil
 	})
 
-	s.meta = meta
+	s.metas = append(s.metas, meta)
 	return nil
 }
 
 func (s *remoteRegistry) Register() error {
 	s.log.Debug("start register")
 
-	var err error
-	if err = s.register(); err != nil {
-		s.log.Error("failed to register server", zap.Error(err))
+	if err := s.register(); err != nil {
+		s.log.Error("failed to register service", zap.Error(err))
+		if err == io.EOF {
+			if err = s.reConnect(); err != nil {
+				s.log.Error("failed to reconnect registry", zap.Error(err))
+			}
+		}
 		return err
 	}
 
@@ -121,42 +94,106 @@ func (s *remoteRegistry) Register() error {
 	return nil
 }
 
-func (s *remoteRegistry) register() error {
-	meta := &space.ServiceInfo{
-		Region:      s.meta.Region,
-		OrgID:       s.meta.OrgID,
-		Namespace:   s.meta.Namespace,
-		ServiceName: s.meta.ServiceName,
-		Host:        s.meta.Host,
-		Port:        int32(s.meta.Port),
-		Weight:      s.meta.Weight,
-		Runtime:     s.meta.Runtime,
-		Tags:        s.meta.Tags,
-		Version:     s.meta.Version,
-	}
-
-	for _, v := range s.meta.Methods {
-		meta.Methods = append(meta.Methods, &space.MethodInfo{
-			Name:           v.Name,
-			IsClientStream: v.IsClientStream,
-			IsServerStream: v.IsServerStream,
-		})
-	}
-
-	if err := s.client.Send(meta); err != nil {
-		if err == io.EOF {
-			if err = s.reConnect(); err != nil {
-				return err
-			}
-			return errors.New("error for retry")
+func (s *remoteRegistry) parserServices() (services []*pb.ServiceInfo) {
+	for _, item := range s.metas {
+		meta := &pb.ServiceInfo{
+			Region:      item.Region,
+			OrgID:       item.OrgID,
+			Namespace:   item.Namespace,
+			ServiceName: item.ServiceName,
+			Host:        item.Host,
+			Port:        int32(item.Port),
+			Weight:      item.Weight,
+			Runtime:     item.Runtime,
+			Tags:        item.Tags,
+			Version:     item.Version,
 		}
-		return err
+
+		for _, v := range item.GrpcMethods {
+			meta.Methods = append(meta.Methods, &pb.MethodInfo{
+				Name:           v.Name,
+				IsClientStream: v.IsClientStream,
+				IsServerStream: v.IsServerStream,
+			})
+		}
+
+		services = append(services, meta)
+	}
+	return
+}
+
+func (s *remoteRegistry) register() error {
+	var (
+		receive  func() (*pb.Command, error)
+		close    func() error
+		services = s.parserServices()
+
+		ctx, cancel = context.WithTimeout(context.Background(), time.Second*3)
+	)
+
+	defer cancel()
+
+	if len(services) == 0 {
+		return errors.New("empty service")
+	} else if len(services) == 1 {
+		cli, err := s.client.Register(ctx)
+		if err != nil {
+			return err
+		}
+
+		if err = cli.Send(services[0]); err != nil {
+			return err
+		}
+
+		receive = cli.Recv
+		close = cli.CloseSend
+	} else {
+		cli, err := s.client.RegisterMulti(ctx)
+		if err != nil {
+			return err
+		}
+
+		if err = cli.Send(&pb.MoultiService{Services: services}); err != nil {
+			return err
+		}
+
+		receive = cli.Recv
+		close = cli.CloseSend
 	}
 
-	s.log.Info("service registered successful",
-		zap.String("namespace", s.meta.Namespace),
-		zap.String("name", s.meta.ServiceName),
-		zap.String("address", fmt.Sprintf("%s:%d", s.meta.Host, s.meta.Port)))
+	// print log
+	for _, service := range services {
+		s.log.Info("service registered successful",
+			zap.String("namespace", service.Namespace),
+			zap.String("name", service.ServiceName),
+			zap.String("address", fmt.Sprintf("%s:%d", service.Host, service.Port)))
+	}
+
+	go safe.Run(func() {
+		defer close()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			default:
+				resp, err := receive()
+				if err != nil {
+					s.log.Warn("recv with error", zap.Error(err))
+					if err == io.EOF {
+						time.Sleep(time.Second)
+						if err = s.reConnect(); err != nil {
+							s.log.Error("failed to reconnect registry", zap.Error(err))
+							continue
+						}
+					}
+
+					s.reRegister()
+					return
+				}
+				s.log.Debug("TODO", zap.String("command", resp.Command), zap.Any("args", resp.Args))
+			}
+		}
+	})
 
 	return nil
 }
@@ -175,7 +212,7 @@ func (s *remoteRegistry) reRegister() {
 	for {
 		select {
 		case <-s.ctx.Done():
-			s.client.CloseSend()
+
 		default:
 			if err := s.Register(); err != nil {
 				time.Sleep(time.Second)
