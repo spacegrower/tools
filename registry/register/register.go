@@ -186,7 +186,7 @@ func (s *remoteRegistry) register() error {
 							continue
 						}
 					}
-
+					time.Sleep(time.Second)
 					s.reRegister()
 					return
 				}
