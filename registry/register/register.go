@@ -128,15 +128,15 @@ func (s *remoteRegistry) register() error {
 		close    func() error
 		services = s.parserServices()
 
-		ctx, cancel = context.WithTimeout(context.Background(), time.Second*3)
+		// ctx, cancel = context.WithTimeout(context.Background(), time.Second*3)
 	)
 
-	defer cancel()
+	// defer cancel()
 
 	if len(services) == 0 {
 		return errors.New("empty service")
 	} else if len(services) == 1 {
-		cli, err := s.client.Register(ctx)
+		cli, err := s.client.Register(s.ctx)
 		if err != nil {
 			return err
 		}
@@ -148,7 +148,7 @@ func (s *remoteRegistry) register() error {
 		receive = cli.Recv
 		close = cli.CloseSend
 	} else {
-		cli, err := s.client.RegisterMulti(ctx)
+		cli, err := s.client.RegisterMulti(s.ctx)
 		if err != nil {
 			return err
 		}
