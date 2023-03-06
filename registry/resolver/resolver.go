@@ -27,7 +27,7 @@ const (
 	RemoteResolverScheme = "watermeloneremote"
 )
 
-func NewRemoteResolver(endpoint, region string, opts ...grpc.DialOption) (wresolver.Resolver, error) {
+func NewRemoteResolver(endpoint string, opts ...grpc.DialOption) (wresolver.Resolver, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	cc, err := grpc.DialContext(ctx, endpoint, opts...)
@@ -39,7 +39,6 @@ func NewRemoteResolver(endpoint, region string, opts ...grpc.DialOption) (wresol
 	rr := &remoteRegistry{
 		ctx:    ctx,
 		cancel: cancel,
-		region: region,
 		log:    wlog.With(zap.String("component", "remote-resolver-builder")),
 		client: pb.NewRegistryClient(cc),
 	}
@@ -56,8 +55,6 @@ type remoteRegistry struct {
 	grpcOptions []grpc.DialOption
 	namespace   string
 	log         wlog.Logger
-
-	region string
 }
 
 func (r *remoteRegistry) Scheme() string {
@@ -71,7 +68,7 @@ func (r *remoteRegistry) GenerateTarget(fullServiceName string) string {
 func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOptions) (
 	resolver.Resolver, error) {
 
-	service := filepath.ToSlash(filepath.Base(target.URL.Path))
+	service := filepath.Base(filepath.ToSlash(target.URL.Path))
 
 	ctx, cancel := context.WithCancel(r.ctx)
 	rr := &remoteResolver{
@@ -79,12 +76,14 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 		cancel:  cancel,
 		client:  r.client,
 		service: service,
-		region:  r.region,
+		region:  target.URL.Query().Get("region"),
 		target:  target,
 		cc:      cc,
 		opts:    opts,
 		log:     wlog.With(zap.String("component", "remote-resolver")),
 	}
+
+	wlog.Debug("will find target", zap.String("target", target.Endpoint()))
 
 	rr.onResolve = func(resp *pb.ResolveInfo) {
 		var addrs []resolver.Address
@@ -265,9 +264,6 @@ func watch(r *remoteResolver) error {
 
 	r.locker.Lock()
 	defer r.locker.Unlock()
-	if r.ctx != nil && r.ctx.Err() == nil {
-		return nil
-	}
 
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	remoteResolver, err := r.client.Resolver(r.ctx,
