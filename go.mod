@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible
-	github.com/spacegrower/watermelon v0.1.0-beta.8
+	github.com/spacegrower/watermelon v0.1.0-beta.9
 	go.uber.org/zap v1.24.0
 	google.golang.org/grpc v1.53.0
 	google.golang.org/protobuf v1.28.1
