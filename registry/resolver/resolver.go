@@ -83,7 +83,7 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 		log:     wlog.With(zap.String("component", "remote-resolver")),
 	}
 
-	wlog.Debug("will find target", zap.String("target", target.Endpoint()))
+	wlog.Debug("will find target", zap.String("target", target.URL.Opaque))
 
 	rr.onResolve = func(resp *pb.ResolveInfo) {
 		var addrs []resolver.Address
@@ -137,7 +137,7 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 			return
 		}
 
-		if rr.delayer.ctx != nil {
+		if rr.delayer != nil && rr.delayer.ctx != nil {
 			rr.delayer.cancel()
 			rr.delayer = nil
 		}
