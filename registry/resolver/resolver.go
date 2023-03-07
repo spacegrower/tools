@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"google.golang.org/grpc/resolver"
 
 	"github.com/spacegrower/tools/registry/pb"
+	"github.com/spacegrower/tools/utils"
 	"github.com/spacegrower/watermelon/infra"
 	"github.com/spacegrower/watermelon/infra/register"
 	"github.com/spacegrower/watermelon/infra/register/etcd"
@@ -81,7 +84,6 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 		cc:      cc,
 		opts:    opts,
 		log:     wlog.With(zap.String("component", "remote-resolver")),
-		first:   true,
 	}
 
 	wlog.Debug("will find target", zap.String("target", target.URL.Opaque))
@@ -114,7 +116,7 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 			}
 		}
 
-		if !rr.first && len(addrs) == 1 && addrs[0] == wresolver.NilAddress && (rr.delayer == nil || rr.delayer.ctx.Err() != nil) {
+		if rr.latestAddrHash != "" && len(addrs) == 1 && addrs[0] == wresolver.NilAddress && (rr.delayer == nil || rr.delayer.ctx.Err() != nil) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute*3)
 			rr.delayer = &delayer{
 				ctx:    ctx,
@@ -137,6 +139,19 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 			}()
 			return
 		}
+
+		var list []string
+		for _, v := range addrs {
+			list = append(list, v.Addr)
+		}
+		sort.Slice(list, func(i, j int) bool {
+			return list[i] < list[j]
+		})
+		latestAddrHash := utils.MD5(strings.Join(list, ","))
+		if rr.latestAddrHash == latestAddrHash {
+			return
+		}
+		rr.latestAddrHash = latestAddrHash
 
 		if rr.delayer != nil && rr.delayer.ctx != nil {
 			rr.delayer.cancel()
@@ -175,8 +190,8 @@ type remoteResolver struct {
 
 	locker sync.Mutex
 
-	delayer *delayer
-	first   bool
+	delayer        *delayer
+	latestAddrHash string
 }
 
 type delayer struct {
