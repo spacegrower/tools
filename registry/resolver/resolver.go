@@ -81,6 +81,7 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 		cc:      cc,
 		opts:    opts,
 		log:     wlog.With(zap.String("component", "remote-resolver")),
+		first:   true,
 	}
 
 	wlog.Debug("will find target", zap.String("target", target.URL.Opaque))
@@ -113,7 +114,7 @@ func (r *remoteRegistry) Build(target resolver.Target, cc resolver.ClientConn, o
 			}
 		}
 
-		if len(addrs) == 1 && addrs[0] == wresolver.NilAddress && (rr.delayer == nil || rr.delayer.ctx.Err() != nil) {
+		if !rr.first && len(addrs) == 1 && addrs[0] == wresolver.NilAddress && (rr.delayer == nil || rr.delayer.ctx.Err() != nil) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute*3)
 			rr.delayer = &delayer{
 				ctx:    ctx,
@@ -175,6 +176,7 @@ type remoteResolver struct {
 	locker sync.Mutex
 
 	delayer *delayer
+	first   bool
 }
 
 type delayer struct {
