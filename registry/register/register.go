@@ -12,6 +12,8 @@ import (
 	"github.com/spacegrower/tools/registry/pb"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/spacegrower/watermelon/infra/definition"
 	"github.com/spacegrower/watermelon/infra/graceful"
@@ -30,22 +32,52 @@ type remoteRegistry struct {
 	metas      []etcd.NodeMeta
 	log        wlog.Logger
 	reConnect  func() error
+	cc         *grpc.ClientConn
+
+	grpcDialOptions []grpc.DialOption
+
+	commandHandler func(*pb.Command)
 }
 
-func NewRemoteRegister(endpoint string, opts ...grpc.DialOption) (register.ServiceRegister[etcd.NodeMeta], error) {
+type Option func(*remoteRegistry)
+
+func WithGrpcDialOption(opts ...grpc.DialOption) Option {
+	return func(rr *remoteRegistry) {
+		rr.grpcDialOptions = opts
+	}
+}
+
+func WithCommandHandler(f func(*pb.Command)) Option {
+	return func(rr *remoteRegistry) {
+		if f != nil {
+			rr.commandHandler = f
+		}
+	}
+}
+
+func NewRemoteRegister(endpoint string, opts ...Option) (register.ServiceRegister[etcd.NodeMeta], error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	rr := &remoteRegistry{
-		ctx:        ctx,
-		cancelFunc: cancel,
-		log:        wlog.With(zap.String("component", "remote-register")),
+		ctx:            ctx,
+		cancelFunc:     cancel,
+		log:            wlog.With(zap.String("component", "remote-register")),
+		commandHandler: func(c *pb.Command) {},
+	}
+
+	for _, opt := range opts {
+		opt(rr)
 	}
 
 	rr.reConnect = func() error {
-		cc, err := grpc.DialContext(ctx, endpoint, opts...)
+		if rr.cc != nil {
+			rr.cc.Close()
+		}
+		cc, err := grpc.DialContext(ctx, endpoint, rr.grpcDialOptions...)
 		if err != nil {
 			return err
 		}
+		rr.cc = cc
 		rr.client = pb.NewRegistryClient(cc)
 		return nil
 	}
@@ -128,32 +160,35 @@ func (s *remoteRegistry) register() error {
 		close    func() error
 		services = s.parserServices()
 
-		// ctx, cancel = context.WithTimeout(context.Background(), time.Second*3)
+		ctx, cancel = context.WithCancel(s.ctx)
 	)
 
-	// defer cancel()
-
 	if len(services) == 0 {
+		cancel()
 		return errors.New("empty service")
 	} else if len(services) == 1 {
-		cli, err := s.client.Register(s.ctx)
+		cli, err := s.client.Register(ctx)
 		if err != nil {
+			cancel()
 			return err
 		}
 
 		if err = cli.Send(services[0]); err != nil {
+			cancel()
 			return err
 		}
 
 		receive = cli.Recv
 		close = cli.CloseSend
 	} else {
-		cli, err := s.client.RegisterMulti(s.ctx)
+		cli, err := s.client.RegisterMulti(ctx)
 		if err != nil {
+			cancel()
 			return err
 		}
 
 		if err = cli.Send(&pb.MoultiService{Services: services}); err != nil {
+			cancel()
 			return err
 		}
 
@@ -161,16 +196,11 @@ func (s *remoteRegistry) register() error {
 		close = cli.CloseSend
 	}
 
-	// print log
-	for _, service := range services {
-		s.log.Info("service registered successful",
-			zap.String("namespace", service.Namespace),
-			zap.String("name", service.ServiceName),
-			zap.String("address", fmt.Sprintf("%s:%d", service.Host, service.Port)))
-	}
-
 	go safe.Run(func() {
-		defer close()
+		defer func() {
+			close()
+			cancel()
+		}()
 		for {
 			select {
 			case <-s.ctx.Done():
@@ -179,18 +209,31 @@ func (s *remoteRegistry) register() error {
 				resp, err := receive()
 				if err != nil {
 					s.log.Warn("recv with error", zap.Error(err))
-					if err == io.EOF {
-						time.Sleep(time.Second)
+					time.Sleep(time.Second)
+					grpcErr, ok := status.FromError(err)
+					if err == io.EOF || (ok && grpcErr.Code() == codes.Unavailable) {
 						if err = s.reConnect(); err != nil {
 							s.log.Error("failed to reconnect registry", zap.Error(err))
 							continue
 						}
 					}
-					time.Sleep(time.Second)
 					s.reRegister()
 					return
 				}
-				s.log.Debug("TODO", zap.String("command", resp.Command), zap.Any("args", resp.Args))
+
+				s.log.Debug("new receive msg", zap.String("command", resp.Command), zap.Any("args", resp.Args))
+				switch resp.Command {
+				case "heartbeat":
+				case "confirm":
+					for _, service := range services {
+						s.log.Info("service registered successful",
+							zap.Any("systems", service.Namespace),
+							zap.String("name", service.ServiceName),
+							zap.String("address", fmt.Sprintf("%s:%d", service.Host, service.Port)))
+					}
+				default:
+					s.commandHandler(resp)
+				}
 			}
 		}
 	})
