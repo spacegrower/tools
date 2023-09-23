@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"sync"
 	"time"
@@ -12,6 +11,9 @@ import (
 	"github.com/spacegrower/tools/registry/pb"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/status"
 
 	"github.com/spacegrower/watermelon/infra/definition"
 	"github.com/spacegrower/watermelon/infra/graceful"
@@ -27,6 +29,7 @@ type remoteRegistry struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	client     pb.RegistryClient
+	cc         *grpc.ClientConn
 	metas      []etcd.NodeMeta
 	log        wlog.Logger
 	reConnect  func() error
@@ -38,15 +41,19 @@ func NewRemoteRegister(endpoint string, opts ...grpc.DialOption) (register.Servi
 	rr := &remoteRegistry{
 		ctx:        ctx,
 		cancelFunc: cancel,
-		log:        wlog.With(zap.String("component", "remote-register")),
+		log:        wlog.With(zap.String("component", "registration")),
 	}
 
 	rr.reConnect = func() error {
-		cc, err := grpc.DialContext(ctx, endpoint, opts...)
+		if rr.cc != nil && rr.cc.GetState() != connectivity.Ready {
+			rr.cc.Close()
+		}
+		var err error
+		rr.cc, err = grpc.DialContext(ctx, endpoint, opts...)
 		if err != nil {
 			return err
 		}
-		rr.client = pb.NewRegistryClient(cc)
+		rr.client = pb.NewRegistryClient(rr.cc)
 		return nil
 	}
 
@@ -56,6 +63,21 @@ func NewRemoteRegister(endpoint string, opts ...grpc.DialOption) (register.Servi
 	}
 
 	return rr, nil
+}
+
+func isDenied(err error) bool {
+	gerr, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch gerr.Code() {
+	case codes.Unauthenticated:
+	case codes.Aborted:
+	case codes.PermissionDenied:
+	default:
+		return false
+	}
+	return true
 }
 
 func (s *remoteRegistry) Append(meta etcd.NodeMeta) error {
@@ -77,7 +99,11 @@ func (s *remoteRegistry) Register() error {
 
 	if err := s.register(); err != nil {
 		s.log.Error("failed to register service", zap.Error(err))
-		if err == io.EOF {
+		if isDenied(err) {
+			s.log.Error("register request is denied, exist")
+			return err
+		}
+		if gerr, ok := status.FromError(err); ok && gerr.Code() == codes.Canceled {
 			if err = s.reConnect(); err != nil {
 				s.log.Error("failed to reconnect registry", zap.Error(err))
 			}
@@ -128,7 +154,7 @@ func (s *remoteRegistry) register() error {
 		close    func() error
 		services = s.parserServices()
 
-		ctx, cancel = context.WithTimeout(context.Background(), time.Second*3)
+		ctx, cancel = context.WithTimeout(context.Background(), time.Second*5)
 	)
 
 	defer cancel()
@@ -178,8 +204,12 @@ func (s *remoteRegistry) register() error {
 			default:
 				resp, err := receive()
 				if err != nil {
-					s.log.Warn("recv with error", zap.Error(err))
-					if err == io.EOF {
+					s.log.Error("recv with error", zap.Error(err))
+					if isDenied(err) {
+						s.log.Error("register request is denied, exist")
+						return
+					}
+					if gerr, ok := status.FromError(err); ok && gerr.Code() == codes.Canceled {
 						time.Sleep(time.Second)
 						if err = s.reConnect(); err != nil {
 							s.log.Error("failed to reconnect registry", zap.Error(err))
@@ -206,6 +236,9 @@ func (s *remoteRegistry) DeRegister() error {
 func (s *remoteRegistry) Close() {
 	// just close kvstore not etcd client
 	s.DeRegister()
+	if s.cc != nil {
+		s.cc.Close()
+	}
 }
 
 func (s *remoteRegistry) reRegister() {
